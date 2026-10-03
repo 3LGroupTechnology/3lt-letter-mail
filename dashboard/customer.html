@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3L-Group Technology — Customer Dashboard</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: .3rem; }
+  .bar { display: flex; gap: .5rem; margin-bottom: 1rem; align-items: center; flex-wrap: wrap; }
+  input[type=text], input[type=password], select { padding: .4rem .6rem; border: 1px solid #ccc; border-radius: 6px; width: 320px; }
+  select { width: auto; }
+  button { padding: .45rem .9rem; border: 0; border-radius: 6px; cursor: pointer; font-weight: 600; background: #1d4ed8; color: #fff; }
+  button.refresh { background: #e5e7eb; color: #1a1a1a; }
+  button.ghost { background: transparent; color: #1d4ed8; padding: .2rem .4rem; font-weight: 500; }
+  button:disabled { opacity: .5; cursor: default; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; margin-top: 1rem; }
+  .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: .8rem 1rem; background: #fafafa; }
+  .card .label { font-size: .75rem; color: #6b7280; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 1.15rem; font-weight: 700; margin-top: .25rem; }
+  .card .sub { font-size: .8rem; color: #6b7280; margin-top: .2rem; }
+  .meter { height: 8px; background: #e5e7eb; border-radius: 999px; margin-top: .5rem; overflow: hidden; }
+  .meter > div { height: 100%; background: #1d4ed8; border-radius: 999px; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #eee; vertical-align: top; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: #f9fafb; }
+  .pill { display: inline-block; padding: .15rem .55rem; border-radius: 999px; font-size: .75rem; font-weight: 700; }
+  .PENDING { background: #fef3c7; color: #92400e; } .SENT { background: #dcfce7; color: #166534; }
+  .REJECTED { background: #fee2e2; color: #991b1b; } .FAILED { background: #fee2e2; color: #991b1b; }
+  .detail { background: #f9fafb; }
+  .detail td { padding: .9rem 1rem; }
+  .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; font-size: .85rem; }
+  .detail-grid h4 { margin: 0 0 .35rem; font-size: .8rem; color: #6b7280; text-transform: uppercase; letter-spacing: .04em; }
+  .err { color: #b91c1c; margin: .5rem 0; }
+  .muted { color: #6b7280; font-size: .85rem; }
+  .mono { font-family: ui-monospace, monospace; font-size: .82rem; }
+  .hidden { display: none; }
+  .warn { border: 1px solid #fca5a5; background: #fef2f2; color: #991b1b; border-radius: 8px; padding: .8rem 1rem; margin-top: 1rem; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>3L-Group Technology — Customer Dashboard</h1>
+<p class="muted"><b>AI Letter Mail</b> — your sends, spend, and account at a glance. Pricing: PostGrid base + <b>$1.00</b> flat service fee per letter.</p>
+
+<div id="login">
+  <div class="bar">
+    <input type="password" id="apikey" placeholder="Your API key (lms_…)" autocomplete="off" spellcheck="false">
+    <button onclick="connect()">View dashboard</button>
+  </div>
+  <p class="muted">Your key is kept in this browser tab's session storage only. It is never logged or sent anywhere except this service.</p>
+</div>
+
+<div id="app" class="hidden">
+  <div class="bar">
+    <span class="muted">Signed in as <b id="who"></b> <span class="mono" id="prefix"></span></span>
+    <button class="ghost" onclick="signOut()">Sign out</button>
+    <span style="flex:1"></span>
+    <button class="refresh" onclick="loadAll()">Refresh</button>
+  </div>
+  <div class="err" id="err"></div>
+  <div id="frozenBox" class="warn hidden"></div>
+
+  <h2>Account</h2>
+  <div class="cards" id="cards"></div>
+
+  <h2>Sends</h2>
+  <div class="bar">
+    <select id="statusFilter" onchange="loadSends()">
+      <option value="">All statuses</option>
+      <option value="PENDING">Pending</option>
+      <option value="SENT">Sent</option>
+      <option value="REJECTED">Rejected</option>
+      <option value="FAILED">Failed</option>
+    </select>
+    <span class="muted" id="count"></span>
+  </div>
+  <table id="sends"><thead><tr>
+    <th></th><th>Date</th><th>Recipient</th><th>Qty</th><th>Status</th><th>Cost</th>
+  </tr></thead><tbody></tbody></table>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const LS_KEY = 'lms_customer_api_key';
+const key = () => sessionStorage.getItem(LS_KEY) || '';
+function headers() { return { 'X-API-Key': key() }; }
+function fail(msg) { $('err').textContent = msg; }
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+const money = c => (c == null ? '—' : '$' + (c / 100).toFixed(2));
+const money2 = n => (n == null ? '—' : '$' + Number(n).toFixed(2));
+
+async function connect() {
+  const v = $('apikey').value.trim();
+  if (!v) { fail('Enter your API key first.'); return; }
+  sessionStorage.setItem(LS_KEY, v);
+  $('apikey').value = '';
+  await loadAll();
+}
+
+function signOut() {
+  sessionStorage.removeItem(LS_KEY);
+  $('app').classList.add('hidden');
+  $('login').classList.remove('hidden');
+}
+
+async function loadAll() {
+  fail('');
+  if (!key()) { signOut(); return; }
+  try {
+    const r = await fetch('/v1/account', { headers: headers() });
+    if (r.status === 401 || r.status === 403) {
+      signOut();
+      $('login').insertAdjacentHTML('afterbegin',
+        '<div class="err">That API key was not recognized. Try again.</div>');
+      return;
+    }
+    if (!r.ok) throw new Error('account: HTTP ' + r.status);
+    const acct = await r.json();
+    renderAccount(acct);
+    $('login').classList.add('hidden');
+    $('app').classList.remove('hidden');
+    await loadSends();
+  } catch (e) { fail(e.message); }
+}
+
+function renderAccount(a) {
+  $('who').textContent = a.name || '';
+  $('prefix').textContent = a.key_prefix ? '(' + a.key_prefix + '…)' : '';
+  const pct = a.monthly_cap_cents > 0
+    ? Math.min(100, Math.round(a.spent_month_cents / a.monthly_cap_cents * 100)) : 0;
+  $('cards').innerHTML = `
+    <div class="card"><div class="label">Plan tier</div><div class="value">${escapeHtml(a.tier)}</div>
+      <div class="sub">${a.require_per_send_approval ? 'Per-send approval on' : 'Zero-prompt sending'}</div></div>
+    <div class="card"><div class="label">Spent this month</div><div class="value">${money(a.spent_month_cents)}</div>
+      <div class="sub">of ${money(a.monthly_cap_cents)} cap</div>
+      <div class="meter"><div style="width:${pct}%"></div></div></div>
+    <div class="card"><div class="label">Payment method</div><div class="value">${a.has_payment_method ? 'On file' : 'Not set'}</div>
+      <div class="sub">${a.owner_email ? escapeHtml(a.owner_email) : 'No receipt email set'}</div></div>
+    <div class="card"><div class="label">Risk level</div><div class="value">L${a.risk_level}</div>
+      <div class="sub">Member since ${escapeHtml((a.created_at || '').slice(0, 10))}</div></div>`;
+  const fb = $('frozenBox');
+  if (a.frozen) {
+    fb.classList.remove('hidden');
+    fb.textContent = 'This key is frozen: ' + (a.frozen_reason || 'contact support') + '. Sending is paused.';
+  } else { fb.classList.add('hidden'); fb.textContent = ''; }
+}
+
+async function loadSends() {
+  fail('');
+  const st = $('statusFilter').value;
+  try {
+    const r = await fetch('/v1/sends' + (st ? '?status=' + st : ''), { headers: headers() });
+    if (r.status === 401 || r.status === 403) { signOut(); return; }
+    if (!r.ok) throw new Error('sends: HTTP ' + r.status);
+    renderSends((await r.json()).sends);
+  } catch (e) { fail(e.message); }
+}
+
+function renderSends(sends) {
+  const tb = $('sends').querySelector('tbody');
+  $('count').textContent = sends.length + ' send' + (sends.length === 1 ? '' : 's');
+  tb.innerHTML = sends.length ? '' :
+    '<tr><td colspan="6" class="muted">No sends yet.</td></tr>';
+  sends.forEach((s, i) => {
+    const cost = s.amount_cents != null ? money(s.amount_cents)
+      : money2(s.cost_breakdown.estimated_total);
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    tr.innerHTML = `<td>▸</td><td>${escapeHtml((s.created_at || '').slice(0, 16).replace('T', ' '))}</td>
+      <td>${escapeHtml(s.recipient_name)}</td><td>${s.quantity}${s.certified ? ' <span class="muted">(certified)</span>' : ''}</td>
+      <td><span class="pill ${escapeHtml(s.status)}">${escapeHtml(s.status)}</span></td>
+      <td>${cost}</td>`;
+    tr.onclick = () => toggleDetail(tr, s, i);
+    tb.appendChild(tr);
+  });
+}
+
+function toggleDetail(tr, s, i) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('detail')) { next.remove(); tr.cells[0].textContent = '▸'; return; }
+  tr.cells[0].textContent = '▾';
+  const a = s.recipient_address;
+  const addr = [a.line1, a.line2, `${a.city}, ${a.state} ${a.zip}`.trim(), a.country]
+    .filter(x => x && x.trim()).map(escapeHtml).join('<br>');
+  const cb = s.cost_breakdown;
+  const d = document.createElement('tr');
+  d.className = 'detail';
+  d.innerHTML = `<td colspan="6"><div class="detail-grid">
+    <div><h4>Recipient</h4>${escapeHtml(s.recipient_name)}<br>${addr}</div>
+    <div><h4>Cost</h4>
+      Provider base (est.): ${money2(cb.base_total)}<br>
+      3L-Group service fee: ${money2(cb.service_fee_total)}<br>
+      ${s.amount_cents != null ? 'Total charged: <b>' + money(s.amount_cents) + '</b>' : 'Estimated total: <b>' + money2(cb.estimated_total) + '</b>'}
+    </div>
+    <div><h4>Tracking</h4>
+      Request #${s.request_id}<br>
+      Provider letter: <span class="mono">${escapeHtml(s.provider_letter_id || '—')}</span><br>
+      ${s.certified ? 'Certified mail + return receipt<br>' : ''}
+      ${s.failure_reason ? '<span class="err">' + escapeHtml(s.failure_reason) + '</span>' : ''}
+    </div>
+    <div><h4>Timeline</h4>
+      Created: ${escapeHtml(s.created_at || '—')}<br>
+      Decided: ${escapeHtml(s.decided_at || '—')}<br>
+      ${s.approved_by ? 'By: ' + escapeHtml(s.approved_by) : ''}
+    </div>
+  </div></td>`;
+  tr.after(d);
+}
+</script>
+<p class="muted" style="margin-top:2rem;border-top:1px solid #ddd;padding-top:.6rem;">A 3L-Group Technology service · AI-native print &amp; mail</p>
+</body>
+</html>

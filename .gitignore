@@ -1,0 +1,40 @@
+# Secrets & local config — never commit
+.env
+.env.local
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+*_rsa
+
+# Live / dev databases (contain API key hashes, customer emails, send history)
+lms.db
+lms.db-*
+*.db
+*.sqlite
+*.sqlite3
+
+# Customer data — never publish
+uploads/
+receipts/
+draft-*/
+*draft*.txt
+*draft*.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Logs
+*.log

@@ -1,0 +1,79 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connect — 3L-Group Technology</title>
+<style>
+body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;
+background:#f6f7f9;color:#1a1a1a}
+.card{max-width:480px;margin:0 auto;background:#fff;border-radius:16px;
+padding:24px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+h2{margin:0 0 4px}
+.sub{color:#666;font-size:14px;margin-bottom:16px;line-height:1.5}
+button{background:#16a34a;color:#fff;border:none;border-radius:12px;
+padding:14px;width:100%;font-size:16px;font-weight:700;cursor:pointer;
+margin-top:12px}
+button:disabled{background:#9ca3af;cursor:default}
+#msg{margin-top:12px;font-size:14px}
+#keybox{margin-top:12px;background:#f6f7f9;border-radius:8px;padding:12px;
+font-size:14px;word-break:break-all;display:none}
+#keybox code{font-size:13px}
+.warn{color:#b45309;font-size:13px;margin-top:8px}
+</style></head><body><div class="card">
+<h2>Connect 3L-Group Technology</h2>
+<div class="sub" id="summary">Loading…</div>
+<div id="pay"></div>
+<button id="go" disabled>Save payment method &amp; connect</button>
+<div id="msg"></div>
+<div id="keybox"></div>
+</div>
+<script src="https://js.stripe.com/v3/"></script>
+<script>
+const msg = t => document.getElementById('msg').textContent = t;
+const token = location.pathname.split('/').filter(Boolean).pop();
+let stripe, elements, clientSecret, setupIntentId = null, done = false;
+
+(async () => {
+  let cfg;
+  try {
+    const r = await fetch(`/v1/connect/${token}/setup-intent`, {method: 'POST'});
+    if (!r.ok) throw new Error(await r.text());
+    cfg = await r.json();
+  } catch (e) { msg('This connect link is invalid or expired.'); return; }
+  clientSecret = cfg.client_secret;
+  if (!cfg.publishable_key) { msg('Payments are not configured on this server.'); return; }
+  document.getElementById('summary').innerHTML =
+    `One-time setup for <b>${cfg.name}</b>.<br>` +
+    `Save a payment method (card, Apple&nbsp;Pay, Google&nbsp;Pay) once — ` +
+    `future sends are charged automatically, up to ` +
+    `<b>$${(cfg.monthly_cap_cents / 100).toFixed(2)}/month</b>. ` +
+    `No per-send prompts.`;
+  stripe = Stripe(cfg.publishable_key);
+  elements = stripe.elements({clientSecret});
+  elements.create('payment').mount('#pay');
+  document.getElementById('go').disabled = false;
+})();
+
+document.getElementById('go').onclick = async () => {
+  if (done) return;
+  const btn = document.getElementById('go');
+  btn.disabled = true; msg('Saving…');
+  const {error, setupIntent} = await stripe.confirmSetup({
+    elements, redirect: 'if_required'});
+  if (error) { msg('Error: ' + error.message); btn.disabled = false; return; }
+  setupIntentId = setupIntent.id;
+  msg('Finalizing…');
+  const r = await fetch(`/v1/connect/${token}/finalize`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({setup_intent_id: setupIntentId})});
+  if (!r.ok) { msg('Finalize failed: ' + await r.text()); btn.disabled = false; return; }
+  const body = await r.json();
+  done = true;
+  document.getElementById('keybox').style.display = 'block';
+  document.getElementById('keybox').innerHTML =
+    `Your API key (shown once — copy it now):<br><code>${body.api_key}</code>` +
+    `<div class="warn">Tier: ${body.tier} · monthly cap ` +
+    `$${(body.monthly_cap_cents / 100).toFixed(2)} · per-send approval off.</div>`;
+  msg('Connected ✓ — your assistant can now send with zero prompts.');
+  btn.style.display = 'none';
+};
+</script></body></html>

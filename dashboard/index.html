@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3L-Group Technology — Letter Mail Approvals</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: .3rem; }
+  .bar { display: flex; gap: .5rem; margin-bottom: 1rem; align-items: center; flex-wrap: wrap; }
+  input[type=text], input[type=password] { padding: .4rem .6rem; border: 1px solid #ccc; border-radius: 6px; width: 320px; }
+  button { padding: .45rem .9rem; border: 0; border-radius: 6px; cursor: pointer; font-weight: 600; }
+  button.approve { background: #15803d; color: #fff; } button.reject { background: #b91c1c; color: #fff; }
+  button.refresh { background: #e5e7eb; } button:disabled { opacity: .5; cursor: default; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #eee; vertical-align: top; }
+  .pill { display: inline-block; padding: .15rem .55rem; border-radius: 999px; font-size: .75rem; font-weight: 700; }
+  .PENDING { background: #fef3c7; color: #92400e; } .SENT { background: #dcfce7; color: #166534; }
+  .REJECTED { background: #fee2e2; color: #991b1b; } .FAILED { background: #fee2e2; color: #991b1b; }
+  .quote { font-size: .8rem; color: #444; background: #f9fafb; border: 1px solid #eee; border-radius: 6px; padding: .5rem .7rem; margin-top: .4rem; }
+  .quote b { color: #111; }
+  .err { color: #b91c1c; margin: .5rem 0; }
+  details { margin-top: .3rem; } summary { cursor: pointer; color: #2563eb; font-size: .85rem; }
+  pre { white-space: pre-wrap; font-size: .8rem; background: #f9fafb; padding: .5rem; border-radius: 6px; max-height: 220px; overflow: auto; }
+  .muted { color: #6b7280; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>✉️ 3L-Group Technology</h1>
+<p class="muted"><b>AI Letter Mail</b> — nothing is mailed until you approve it here. Pricing: PostGrid base + <b>$1.00</b> flat service fee per letter, at every quantity. No tiers, no volume games.</p>
+
+<div class="bar">
+  <input type="password" id="token" placeholder="Admin token (X-Admin-Token)">
+  <button class="refresh" onclick="loadAll()">Load / Refresh</button>
+</div>
+<div class="err" id="err"></div>
+
+<h2>Pending approvals</h2>
+<table id="pending"><thead><tr><th>ID</th><th>Created</th><th>Qty</th><th>Cost breakdown</th><th>Actions</th></tr></thead><tbody></tbody></table>
+
+<h2>History</h2>
+<table id="history"><thead><tr><th>ID</th><th>Status</th><th>Created</th><th>Decided</th><th>Provider letter</th><th>Cost</th></tr></thead><tbody></tbody></table>
+
+<script>
+const $ = id => document.getElementById(id);
+const token = () => $('token').value.trim();
+function headers() { return { 'X-Admin-Token': token(), 'Content-Type': 'application/json' }; }
+function fail(msg) { $('err').textContent = msg; }
+
+function breakdown(q) {
+  // total_charged is the single customer-facing gross total (processing
+  // baked in); fall back to the net estimate for quotes written before it.
+  const gross = (q.total_charged != null) ? q.total_charged : q.estimated_total;
+  const proc = (q.processing_fee_total != null)
+    ? q.processing_fee_total : Math.max(0, gross - q.estimated_total);
+  return `<div class="quote">
+    Tier: <b>Flat — $1.00/letter</b> (${q.quantity} letter${q.quantity > 1 ? 's' : ''})<br>
+    PostGrid base: $${q.base_cost_per_letter} × ${q.quantity} = <b>$${q.base_total.toFixed(2)}</b><br>
+    Service fee: $${q.service_fee_per_letter.toFixed(2)} × ${q.quantity} = <b>$${q.service_fee_total.toFixed(2)}</b><br>
+    Processing: <b>$${proc.toFixed(2)}</b><br>
+    Total charged: <b>$${gross.toFixed(2)}</b><br>
+    <span class="muted">${q.note}</span></div>`;
+}
+
+async function loadAll() {
+  fail('');
+  if (!token()) { fail('Enter the admin token first.'); return; }
+  try {
+    const [p, h] = await Promise.all([
+      fetch('/v1/admin/sends?status=PENDING', { headers: headers() }),
+      fetch('/v1/admin/sends', { headers: headers() }),
+    ]);
+    if (!p.ok) throw new Error('pending: HTTP ' + p.status);
+    if (!h.ok) throw new Error('history: HTTP ' + h.status);
+    renderPending((await p.json()).sends);
+    renderHistory((await h.json()).sends);
+  } catch (e) { fail(e.message); }
+}
+
+function renderPending(sends) {
+  const tb = $('pending').querySelector('tbody');
+  tb.innerHTML = sends.length ? '' : '<tr><td colspan="5" class="muted">Nothing waiting.</td></tr>';
+  for (const s of sends) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>#${s.id}<br><span class="muted">draft ${s.draft_id}</span></td>
+      <td>${s.created_at}</td><td>${s.quantity}</td>
+      <td>${breakdown(s.quote)}
+        <details><summary>Letter preview</summary><pre>${escapeHtml(s.html_preview || '')}</pre></details></td>
+      <td><button class="approve" onclick="decide(${s.id}, true)">Approve &amp; send</button>
+          <button class="reject" onclick="decide(${s.id}, false)">Reject</button></td>`;
+    tb.appendChild(tr);
+  }
+}
+
+function renderHistory(sends) {
+  const tb = $('history').querySelector('tbody');
+  tb.innerHTML = sends.length ? '' : '<tr><td colspan="6" class="muted">No sends yet.</td></tr>';
+  for (const s of sends.slice(0, 50)) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>#${s.id}</td><td><span class="pill ${s.status}">${s.status}</span></td>
+      <td>${s.created_at}</td><td>${s.decided_at || '—'}</td>
+      <td>${s.provider_letter_id || '—'}</td><td>$${(s.quote.total_charged != null ? s.quote.total_charged : s.quote.estimated_total).toFixed(2)} <span class="muted">(${s.quote.tier})</span></td>`;
+    tb.appendChild(tr);
+  }
+}
+
+async function decide(id, approve) {
+  let reason = null;
+  if (!approve) { reason = prompt('Rejection reason (optional):'); if (reason === null) return; }
+  if (approve && !confirm('Approve and MAIL letter request #' + id + '? This sends a physical letter.')) return;
+  try {
+    const r = await fetch(`/v1/admin/sends/${id}/${approve ? 'approve' : 'reject'}`, {
+      method: 'POST', headers: headers(), body: JSON.stringify({ reason }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+    loadAll();
+  } catch (e) { fail(e.message); }
+}
+
+function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+</script>
+<p class="muted" style="margin-top:2rem;border-top:1px solid #ddd;padding-top:.6rem;">A 3L-Group Technology service · AI-native print &amp; mail</p>
+</body>
+</html>
