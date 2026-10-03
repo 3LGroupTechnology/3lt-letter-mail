@@ -1,0 +1,25 @@
+services:
+  letter-mail:
+    build: .
+    image: 3l-group-technology/letter-mail:latest
+    container_name: lms-letter-mail
+    env_file:
+      - .env
+    environment:
+      LMS_DB_PATH: /data/lms.db
+    volumes:
+      - lms-data:/data
+    ports:
+      - "8000:8000"   # REST API + approval dashboard
+      - "8001:8001"   # MCP server (agents)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  lms-data:
+    name: lms-data
