@@ -38,3 +38,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Shared 3LT library — canonical home is the sibling 3lt-shared/ repo dir.
+# It is copied into this directory only as a Docker build step (see
+# DEPLOY.md); never commit the copy.
+3lt-shared/
