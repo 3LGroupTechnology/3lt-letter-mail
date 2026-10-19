@@ -1,0 +1,68 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connect — 3L-Group Technology</title>
+<style>
+body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;
+background:#f6f7f9;color:#1a1a1a}
+.card{max-width:480px;margin:0 auto;background:#fff;border-radius:16px;
+padding:24px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+h2{margin:0 0 4px}
+.sub{color:#666;font-size:14px;margin-bottom:16px;line-height:1.5}
+label{display:block;font-size:13px;font-weight:600;margin-top:12px}
+input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;
+border-radius:8px;font-size:15px;margin-top:4px}
+button{background:#16a34a;color:#fff;border:none;border-radius:12px;
+padding:14px;width:100%;font-size:16px;font-weight:700;cursor:pointer;
+margin-top:16px}
+button:disabled{background:#9ca3af;cursor:default}
+#msg{margin-top:12px;font-size:14px}
+.steps{font-size:14px;line-height:1.6;color:#333;padding-left:1.2rem}
+.foot{color:#888;font-size:12px;margin-top:16px;line-height:1.5}
+</style></head><body><div class="card">
+<h2>Connect 3L-Group Technology</h2>
+<div class="sub">Give your AI assistant hands: connect once, and it can mail
+real USPS letters for you — inside a monthly budget you control.</div>
+<ol class="steps">
+  <li><b>Start below</b> — tell us whose account this is and the monthly
+  budget cap.</li>
+  <li><b>Save a payment method</b> — card, Apple&nbsp;Pay, or Google&nbsp;Pay,
+  on the secure page that follows.</li>
+  <li><b>Get your API key</b> — shown once. Add it to your assistant's MCP
+  configuration and it can draft and send inside your cap, with no per-send
+  prompts.</li>
+</ol>
+<label for="name">Account name</label>
+<input id="name" type="text" autocomplete="name" placeholder="e.g. Acme Operations">
+<label for="email">Email</label>
+<input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+<label for="cap">Monthly budget cap (USD, $10 minimum)</label>
+<input id="cap" type="number" min="10" step="1" value="50">
+<button id="go">Start connect</button>
+<div id="msg"></div>
+<div class="foot">Nothing is charged during setup. Sends are billed against
+your saved payment method only when a letter is mailed, never above your
+monthly cap. See our <a href="/privacy.html">privacy policy</a>.</div>
+</div>
+<script>
+const msg = t => document.getElementById('msg').textContent = t;
+document.getElementById('go').onclick = async () => {
+  const btn = document.getElementById('go');
+  const name = document.getElementById('name').value.trim();
+  const email = document.getElementById('email').value.trim();
+  const capDollars = parseFloat(document.getElementById('cap').value);
+  if (!name || !email || !(capDollars >= 10)) {
+    msg('Enter a name, an email, and a monthly cap of at least $10.'); return;
+  }
+  btn.disabled = true; msg('Starting…');
+  try {
+    const r = await fetch('/v1/connect', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, owner_email: email,
+        monthly_cap_cents: Math.round(capDollars * 100)})});
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || ('HTTP ' + r.status));
+    location.href = body.connect_url;
+  } catch (e) { msg('Could not start connect: ' + e.message); btn.disabled = false; }
+};
+</script></body></html>
