@@ -2,7 +2,7 @@
 
 Exposes these tools to AI agents:
   - draft_letter:  validate address + screen content + price quote. NEVER sends.
-                   Accepts HTML (html=...) or a server-local PDF (pdf_path=...).
+                   Accepts HTML (html=...) or a PDF stored in the service uploads directory (pdf_path=...).
   - request_send:  create a send request. approval-tier keys get a PENDING
                    request + one-tap Allow/Deny link; on_command keys may
                    auto-send inside guardrails (caps, screening, anomaly).
@@ -40,6 +40,28 @@ mcp = FastMCP("3l-group-technology-letter-mail")
 db.init_db()
 mail_provider.guard_live_key()
 phaxio_client.guard_live_key()
+
+
+def _read_confined_pdf(pdf_path: str):
+    """Read a server-local PDF, confined to the service uploads dir.
+
+    Hotfix 2026-10-19: pdf_path previously accepted ANY server-readable
+    file, so any API key could mail/fax other customers' stored PDFs or
+    arbitrary files off the box. A path is now honored only if its real
+    location is inside core.UPLOADS_DIR (where the service itself stores
+    uploaded PDFs). Returns (bytes, None) or (None, error_dict).
+    """
+    if not pdf_path or not os.path.isfile(pdf_path):
+        return None, {"error": f"pdf_path not found: {pdf_path}", "code": 422}
+    root = os.path.realpath(core.UPLOADS_DIR)
+    full = os.path.realpath(pdf_path)
+    if full != root and not full.startswith(root + os.sep):
+        return None, {
+            "error": "pdf_path must be inside the service uploads directory",
+            "code": 422,
+        }
+    with open(full, "rb") as f:
+        return f.read(), None
 
 
 def _auth(api_key: str):
@@ -90,10 +112,9 @@ def draft_letter(
     key_row = _auth(api_key)
     try:
         if pdf_path:
-            if not os.path.isfile(pdf_path):
-                return {"error": f"pdf_path not found: {pdf_path}", "code": 422}
-            with open(pdf_path, "rb") as f:
-                pdf_bytes = f.read()
+            pdf_bytes, err = _read_confined_pdf(pdf_path)
+            if err:
+                return err
             return core.create_draft_pdf(
                 key_row, to, from_address, pdf_bytes,
                 filename=os.path.basename(pdf_path),
@@ -138,9 +159,9 @@ def send_status(api_key: str, request_id: int) -> dict:
         api_key: your 3L-Group Technology API key (lms_...).
         request_id: the request_id returned by request_send.
     """
-    _auth(api_key)
+    key_row = _auth(api_key)
     try:
-        return core.get_status(request_id)
+        return core.get_status(request_id, key_row)
     except core.AppError as exc:
         return {"error": str(exc), "code": exc.code}
 
@@ -166,10 +187,9 @@ def create_fax_draft(
     """
     key_row = _auth(api_key)
     try:
-        if not os.path.isfile(pdf_path):
-            return {"error": f"pdf_path not found: {pdf_path}", "code": 422}
-        with open(pdf_path, "rb") as f:
-            pdf_bytes = f.read()
+        pdf_bytes, err = _read_confined_pdf(pdf_path)
+        if err:
+            return err
         return core.create_fax_draft(
             key_row, to_number, pdf_bytes,
             filename=os.path.basename(pdf_path), description=description,

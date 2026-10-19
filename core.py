@@ -321,6 +321,12 @@ def request_send(api_key_row, draft_id: int) -> dict:
     draft = db.get_draft(draft_id)
     if not draft:
         raise AppError("draft not found", 404)
+    # Ownership (hotfix 2026-10-19): a key may only send its OWN drafts.
+    # Caps/frozen checks run on the caller; without this check any key
+    # could mail (and bill) another key's draft. 404, not 403: the
+    # existence of another key's draft is not disclosed.
+    if draft["api_key_id"] != api_key_row["id"]:
+        raise AppError("draft not found", 404)
     quote = json.loads(draft["quote_json"])
     # NET stays net (PostGrid base + 3LT fee); the customer is charged the
     # grossed-up figure so Stripe's processing rides on top invisibly.
@@ -656,9 +662,15 @@ def _maybe_email_receipt(key_row, send_row, request_id: int, quote: dict,
 
 
 # ---- status -------------------------------------------------------------------------------
-def get_status(request_id: int) -> dict:
+def get_status(request_id: int, api_key_row=None) -> dict:
     row = db.get_send_request(request_id)
     if not row:
+        raise AppError("send request not found", 404)
+    # Ownership (hotfix 2026-10-19): when a caller key is supplied, the
+    # request must belong to that key. The response carries the one-tap
+    # approval_url while PENDING — an unscoped read lets any key fetch
+    # (and use) another customer's approval link. 404: no disclosure.
+    if api_key_row is not None and row["api_key_id"] != api_key_row["id"]:
         raise AppError("send request not found", 404)
     key_row = db.get_key(row["api_key_id"])
     tier = draft_tier(key_row) if key_row else "approval"

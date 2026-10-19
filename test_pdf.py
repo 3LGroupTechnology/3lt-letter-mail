@@ -211,7 +211,7 @@ with patch("mail_provider.verify_address", return_value=FAKE_VERIFICATION), patc
     print("5. PDF text screened at draft (blocked phrase -> 422) ✔")
 
     # 6. MCP draft_letter accepts pdf_path
-    tmp = tempfile.mktemp(suffix=".pdf")
+    tmp = tempfile.mktemp(suffix=".pdf", dir=os.environ["LMS_UPLOADS_DIR"])
     with open(tmp, "wb") as f:
         f.write(make_pdf("via mcp"))
     res = mcp_server.draft_letter(api_key=raw, to=ADDR, from_address=ADDR,

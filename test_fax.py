@@ -256,7 +256,7 @@ with patch("phaxio_client.send_fax", side_effect=fake_send_fax), patch(
     print("12. live key refused without ALLOW_LIVE_FAX=1; allowed with it ✔")
 
     # 14. MCP tools: draft -> approve -> send -> status, same core flow
-    tmp_pdf = os.path.join(tempfile.mkdtemp(prefix="tlt_fax_mcp_"), "doc.pdf")
+    tmp_pdf = os.path.join(os.environ["LMS_UPLOADS_DIR"], "mcp_doc.pdf")
     with open(tmp_pdf, "wb") as f:
         f.write(PDF1)
     out = mcp_server.create_fax_draft(KEY, "216-555-0123", tmp_pdf)

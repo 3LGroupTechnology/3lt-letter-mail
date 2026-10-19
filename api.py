@@ -681,7 +681,7 @@ def request_send(body: SendBody, key=Depends(require_key)):
 @app.get("/v1/sends/{request_id}")
 def send_status(request_id: int, key=Depends(require_key)):
     try:
-        return core.get_status(request_id)
+        return core.get_status(request_id, key)
     except core.AppError as exc:
         raise _err(exc)
 
