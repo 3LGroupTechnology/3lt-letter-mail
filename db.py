@@ -58,13 +58,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE TABLE IF NOT EXISTS billing_receipts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    send_request_id INTEGER NOT NULL,
+    send_request_id INTEGER,
     api_key_id INTEGER NOT NULL,
     amount_cents INTEGER NOT NULL,
     currency TEXT NOT NULL DEFAULT 'usd',
     stripe_payment_id TEXT,
     status TEXT NOT NULL,
     idempotency_key TEXT NOT NULL UNIQUE,
+    fax_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS approval_tokens (
@@ -92,6 +93,23 @@ CREATE TABLE IF NOT EXISTS risk_events (
     api_key_id INTEGER NOT NULL,
     kind TEXT NOT NULL,
     detail TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS faxes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    api_key_id INTEGER,
+    to_number TEXT NOT NULL,
+    pdf_path TEXT,
+    page_count INTEGER,
+    description TEXT,
+    quote_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'DRAFT',
+    provider_fax_id TEXT,
+    failure_reason TEXT,
+    approved_by TEXT,
+    decided_at TEXT,
+    needs_review INTEGER NOT NULL DEFAULT 0,
+    idempotency_key TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_risk_events_key_kind
@@ -178,6 +196,45 @@ def _migrate(conn) -> None:
             "ALTER TABLE send_requests "
             "RENAME COLUMN lob_letter_id TO provider_letter_id"
         )
+    _migrate_receipts_fax(conn)
+
+
+def _migrate_receipts_fax(conn) -> None:
+    """Fax billing: a receipt must be able to belong to a FAX instead of a
+    letter send_request (a fax has no send_request row — forcing one would
+    alias fax receipts onto letter requests with the same numeric id).
+    Rebuild billing_receipts with send_request_id nullable + a fax_id
+    column when the table predates fax billing. Idempotent: no-op once
+    fax_id exists. Existing rows keep send_request_id set, fax_id NULL."""
+    info = conn.execute("PRAGMA table_info(billing_receipts)").fetchall()
+    if not info:
+        return
+    if "fax_id" in {r["name"] for r in info}:
+        return
+    conn.executescript(
+        """
+        CREATE TABLE billing_receipts_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            send_request_id INTEGER,
+            api_key_id INTEGER NOT NULL,
+            amount_cents INTEGER NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'usd',
+            stripe_payment_id TEXT,
+            status TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            fax_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO billing_receipts_new
+            (id, send_request_id, api_key_id, amount_cents, currency,
+             stripe_payment_id, status, idempotency_key, created_at)
+        SELECT id, send_request_id, api_key_id, amount_cents, currency,
+               stripe_payment_id, status, idempotency_key, created_at
+        FROM billing_receipts;
+        DROP TABLE billing_receipts;
+        ALTER TABLE billing_receipts_new RENAME TO billing_receipts;
+        """
+    )
 
 
 def init_db() -> None:
@@ -507,6 +564,45 @@ def update_send_request(request_id: int, **fields) -> None:
         )
 
 
+# ---- faxes ------------------------------------------------------------------
+def insert_fax(api_key_id, to_number, page_count, description, quote,
+               needs_review=False) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO faxes
+               (api_key_id, to_number, page_count, description, quote_json,
+                needs_review)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                api_key_id,
+                to_number,
+                page_count,
+                description,
+                json.dumps(quote),
+                1 if needs_review else 0,
+            ),
+        )
+        return cur.lastrowid
+
+
+def get_fax(fax_id: int):
+    with connect() as conn:
+        return conn.execute("SELECT * FROM faxes WHERE id = ?", (fax_id,)).fetchone()
+
+
+def update_fax(fax_id: int, **fields) -> None:
+    allowed = {"pdf_path", "status", "provider_fax_id", "failure_reason",
+               "approved_by", "decided_at", "idempotency_key"}
+    sets = [f"{k} = ?" for k in fields if k in allowed]
+    if not sets:
+        return
+    with connect() as conn:
+        conn.execute(
+            f"UPDATE faxes SET {', '.join(sets)} WHERE id = ?",
+            [fields[k] for k in fields if k in allowed] + [fax_id],
+        )
+
+
 # ---- spend / anomaly measurements ------------------------------------------
 def spend_today_cents(api_key_id: int) -> int:
     """Committed spend today: sum of amount_cents for SENT requests decided today."""
@@ -589,6 +685,64 @@ def get_receipts_for_request(request_id: int):
             "ORDER BY id DESC",
             (request_id,),
         ).fetchall()
+
+
+# Fax receipts share billing_receipts with letters; the fax_id column (and a
+# NULL send_request_id) is what keeps the two products' records apart.
+def insert_fax_receipt(fax_id: int, api_key_id: int, amount_cents: int,
+                       currency: str, stripe_payment_id: str | None,
+                       status: str, idempotency_key: str) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO billing_receipts
+               (send_request_id, fax_id, api_key_id, amount_cents, currency,
+                stripe_payment_id, status, idempotency_key)
+               VALUES (NULL, ?, ?, ?, ?, ?, ?, ?)""",
+            (fax_id, api_key_id, amount_cents, currency,
+             stripe_payment_id, status, idempotency_key),
+        )
+        return cur.lastrowid
+
+
+def get_fax_receipt_by_idempotency(idempotency_key: str):
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM billing_receipts WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+
+
+def get_receipts_for_fax(fax_id: int):
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM billing_receipts WHERE fax_id = ? "
+            "ORDER BY id DESC",
+            (fax_id,),
+        ).fetchall()
+
+
+def _fax_spend_cents(api_key_id: int, today: bool) -> int:
+    """Committed fax spend: captured (succeeded) fax receipts only — a
+    voided authorization never captured money, so it never counts."""
+    window = ("date(created_at) = date('now')" if today
+              else "strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')")
+    with connect() as conn:
+        row = conn.execute(
+            f"""SELECT COALESCE(SUM(amount_cents), 0) AS total
+                FROM billing_receipts
+                WHERE api_key_id = ? AND fax_id IS NOT NULL
+                  AND status = 'succeeded' AND {window}""",
+            (api_key_id,),
+        ).fetchone()
+        return int(row["total"] or 0)
+
+
+def fax_spend_today_cents(api_key_id: int) -> int:
+    return _fax_spend_cents(api_key_id, today=True)
+
+
+def fax_spend_month_cents(api_key_id: int) -> int:
+    return _fax_spend_cents(api_key_id, today=False)
 
 
 # ---- approval tokens (single-use Allow/Deny links) ---------------------------
