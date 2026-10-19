@@ -33,6 +33,7 @@ if os.path.isdir(_SHARED) and _SHARED not in sys.path:
 
 import db
 import mail_provider
+import phaxio_client
 import pricing
 import risk
 import screen
@@ -697,3 +698,297 @@ def get_status(request_id: int) -> dict:
         "kind": "pdf" if row["pdf_path"] else "html",
         "test_mode": mail_provider.is_test_mode(),
     }
+
+
+# ---- faxes ------------------------------------------------------------------
+# Fax mirrors the letter lifecycle as a single-resource state machine on the
+# faxes table: DRAFT -> APPROVED -> SENT (or FAILED). The golden rule is the
+# same as letters: a fax is NEVER transmitted without an approval record —
+# approve_fax() is that record, and send_fax() refuses anything not APPROVED.
+# Unlike letters there is no zero-prompt tier path for fax yet: every fax
+# takes the explicit approve step.
+
+def _fax_test_mode():
+    """Phaxio test-mode flag, or None when fax is not configured yet."""
+    if not phaxio_client.is_configured():
+        return None
+    return phaxio_client.is_test_mode()
+
+
+def _normalize_fax_number(raw: str) -> str:
+    """Normalize a fax recipient number to E.164 (+<country><number>).
+
+    E.164-ish sanity only: strips common punctuation; a leading + requires
+    10-15 digits after it; bare numbers must be 10 digits (assumed US, +1
+    prepended) or 11 digits starting with 1. Anything else -> 422.
+    """
+    s = (raw or "").strip()
+    for ch in " \t-().":
+        s = s.replace(ch, "")
+    if s.startswith("+"):
+        digits = s[1:]
+        if digits.isdigit() and 10 <= len(digits) <= 15:
+            return s
+        raise AppError(
+            "invalid fax number: after '+' an E.164 number has 10-15 digits",
+            422,
+        )
+    if not s.isdigit():
+        raise AppError(
+            "invalid fax number: digits only (optionally with a leading +)",
+            422,
+        )
+    if len(s) == 10:
+        return "+1" + s
+    if len(s) == 11 and s.startswith("1"):
+        return "+" + s
+    raise AppError(
+        "invalid fax number: expected a 10-digit US number or a full "
+        "E.164 number starting with +",
+        422,
+    )
+
+
+def _store_fax_pdf(fax_id: int, pdf_bytes: bytes) -> str:
+    fax_dir = os.path.join(UPLOADS_DIR, f"fax_{fax_id}")
+    os.makedirs(fax_dir, exist_ok=True)
+    path = os.path.join(fax_dir, "source.pdf")
+    with open(path, "wb") as f:
+        f.write(pdf_bytes)
+    return path
+
+
+def _get_owned_fax(api_key_row, fax_id: int):
+    """Fetch a fax scoped to the calling key — a key can never see or act
+    on another key's faxes (404, not 403, so existence never leaks)."""
+    row = db.get_fax(fax_id)
+    if not row or row["api_key_id"] != api_key_row["id"]:
+        raise AppError("fax not found", 404)
+    return row
+
+
+def _check_fax_key_not_frozen(api_key_row, fax_id, approver: str) -> None:
+    frozen, frozen_reason = risk.check_frozen(api_key_row)
+    if frozen:
+        db.audit(approver, "fax.blocked", "fax", fax_id,
+                 {"reason": "key_frozen", "frozen_reason": frozen_reason})
+        raise AppError(f"This API key is frozen: {frozen_reason}", 403)
+
+
+def create_fax_draft(
+    api_key_row,
+    to_number: str,
+    pdf_bytes: bytes,
+    filename: str = "fax.pdf",
+    description: str | None = None,
+) -> dict:
+    """Validate, screen, quote, and store a fax draft. Does NOT send anything.
+
+    Mirrors create_draft_pdf: page count + text come from _pdf_info; if
+    text extraction fails the draft is KEPT but flagged needs_review (the
+    explicit approve step is then the only screening control).
+    """
+    number = _normalize_fax_number(to_number)
+    if not pdf_bytes:
+        raise AppError("PDF file is required", 422)
+    if len(pdf_bytes) > MAX_PDF_BYTES:
+        raise AppError(
+            f"PDF is {len(pdf_bytes)} bytes; limit is {MAX_PDF_BYTES} bytes", 413
+        )
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise AppError("uploaded file is not a PDF (bad magic bytes)", 422)
+
+    page_count, text = _pdf_info(pdf_bytes)
+    needs_review = text is None
+    if not needs_review:
+        ok, reason = screen.screen_content(text or "")
+        if not ok:
+            db.audit(_actor(api_key_row), "fax.blocked", "fax", None,
+                     {"reason": reason})
+            risk.record_event(api_key_row["id"], "flag",
+                              {"reason": reason, "stage": "fax_draft",
+                               "kind": "pdf"},
+                              actor=_actor(api_key_row))
+            raise AppError(f"Content screening failed: {reason}", 422)
+
+    quote = pricing.quote_fax(page_count)
+    _enrich_quote(quote)  # estimated_total stays NET; total_charged is gross
+    fax_id = db.insert_fax(
+        api_key_row["id"], number, page_count, description, quote,
+        needs_review=needs_review,
+    )
+    pdf_path = _store_fax_pdf(fax_id, pdf_bytes)
+    db.update_fax(fax_id, pdf_path=pdf_path)
+    db.audit(
+        _actor(api_key_row), "fax.create", "fax", fax_id,
+        {"to_number": number, "page_count": page_count,
+         "needs_review": needs_review,
+         "estimated_total": quote["estimated_total"], "filename": filename},
+    )
+    return {
+        "fax_id": fax_id,
+        "kind": "fax",
+        "status": "DRAFT",
+        "to_number": number,
+        "page_count": page_count,
+        "needs_review": needs_review,
+        "quote": quote,
+        "test_mode": _fax_test_mode(),
+    }
+
+
+def approve_fax(api_key_row, fax_id: int) -> dict:
+    """Approve a DRAFT fax: re-screen the stored PDF, then record the
+    approval. This record is the gate send_fax() checks — no approval
+    record, no transmission, exactly like letters."""
+    approver = _actor(api_key_row)
+    row = _get_owned_fax(api_key_row, fax_id)
+    if row["status"] != "DRAFT":
+        raise AppError(
+            f"fax is {row['status']}, only DRAFT can be approved", 409
+        )
+    _check_fax_key_not_frozen(api_key_row, fax_id, approver)
+
+    # Re-screen at approval time — content rules may have changed since
+    # draft (mirrors approve_send). Unscreenable PDFs (needs_review) stay
+    # flagged; the human approval here is the control for those.
+    try:
+        with open(row["pdf_path"], "rb") as f:
+            _, pdf_text = _pdf_info(f.read())
+    except OSError:
+        pdf_text = None
+    if pdf_text is not None:
+        ok, reason = screen.screen_content(pdf_text)
+        if not ok:
+            db.update_fax(
+                fax_id, status="FAILED",
+                failure_reason=f"screening: {reason}", decided_at=_now(),
+            )
+            db.audit(approver, "fax.blocked", "fax", fax_id,
+                     {"reason": reason})
+            risk.record_event(api_key_row["id"], "flag",
+                              {"reason": reason, "stage": "fax_approval",
+                               "fax_id": fax_id},
+                              actor=approver)
+            raise AppError(f"Content screening failed at approval: {reason}", 422)
+
+    db.update_fax(fax_id, status="APPROVED", approved_by=approver)
+    db.audit(approver, "fax.approved", "fax", fax_id,
+             {"to_number": row["to_number"], "page_count": row["page_count"]})
+    return {
+        "fax_id": fax_id,
+        "status": "APPROVED",
+        "to_number": row["to_number"],
+        "page_count": row["page_count"],
+        "approved_by": approver,
+        "quote": json.loads(row["quote_json"]),
+        "test_mode": _fax_test_mode(),
+    }
+
+
+def send_fax(api_key_row, fax_id: int) -> dict:
+    """Transmit an APPROVED fax via Phaxio.
+
+    Idempotency: the provider call carries the stable key
+    ``3lt-fax-{fax_id}`` (same pattern as letters' ``3lt-send-{request_id}``),
+    and the status machine is the hard guard — an APPROVED fax can move to
+    SENT exactly once, so a retried send_fax() gets a 409, never a second
+    transmission.
+    """
+    actor = _actor(api_key_row)
+    row = _get_owned_fax(api_key_row, fax_id)
+    if row["status"] == "SENT":
+        raise AppError("fax was already sent", 409)
+    if row["status"] != "APPROVED":
+        raise AppError(
+            f"fax is {row['status']}, only APPROVED faxes can be sent — "
+            "approve it first",
+            409,
+        )
+    _check_fax_key_not_frozen(api_key_row, fax_id, actor)
+
+    # Live guard: a live Phaxio key is refused unless ALLOW_LIVE_FAX=1
+    # (phaxio_client.send_fax re-checks at call time as defense in depth).
+    if (
+        phaxio_client.is_configured()
+        and not phaxio_client.is_test_mode()
+        and os.environ.get("ALLOW_LIVE_FAX") != "1"
+    ):
+        db.audit(actor, "fax.blocked", "fax", fax_id,
+                 {"reason": "live_fax_not_allowed"})
+        raise AppError(
+            "Live faxing is disabled: set ALLOW_LIVE_FAX=1 to send real "
+            "faxes — nothing was transmitted.",
+            403,
+        )
+
+    idempotency_key = f"3lt-fax-{fax_id}"
+    db.update_fax(fax_id, idempotency_key=idempotency_key)
+    try:
+        result = phaxio_client.send_fax(
+            to=row["to_number"],
+            pdf_path=row["pdf_path"],
+            idempotency_key=idempotency_key,
+        )
+    except phaxio_client.PhaxioError as exc:
+        db.update_fax(
+            fax_id, status="FAILED", failure_reason=str(exc),
+            decided_at=_now(),
+        )
+        db.audit(actor, "fax.failed", "fax", fax_id, {"error": str(exc)})
+        raise AppError(f"Phaxio send failed: {exc}", 502)
+
+    db.update_fax(
+        fax_id,
+        status="SENT",
+        provider_fax_id=result.get("id"),
+        decided_at=_now(),
+    )
+    db.audit(actor, "fax.sent", "fax", fax_id,
+             {"provider_fax_id": result.get("id")})
+    # Clean send: feed the risk model so caps rise with good history.
+    risk.recompute(api_key_row["id"], actor=actor)
+    return {
+        "fax_id": fax_id,
+        "status": "SENT",
+        "to_number": row["to_number"],
+        "page_count": row["page_count"],
+        "provider_fax_id": result.get("id"),
+        "provider_status": result.get("status"),
+        "quote": json.loads(row["quote_json"]),
+        "test_mode": _fax_test_mode(),
+    }
+
+
+def get_fax_status(api_key_row, fax_id: int) -> dict:
+    """Fax status for the owning key. For a SENT fax the provider's live
+    delivery status is refreshed from Phaxio when reachable; a provider
+    outage never breaks the read (the stored snapshot is still returned).
+    """
+    row = _get_owned_fax(api_key_row, fax_id)
+    out = {
+        "fax_id": row["id"],
+        "kind": "fax",
+        "status": row["status"],
+        "to_number": row["to_number"],
+        "page_count": row["page_count"],
+        "needs_review": bool(row["needs_review"]),
+        "description": row["description"],
+        "provider_fax_id": row["provider_fax_id"],
+        "failure_reason": row["failure_reason"],
+        "approved_by": row["approved_by"],
+        "created_at": row["created_at"],
+        "decided_at": row["decided_at"],
+        "quote": json.loads(row["quote_json"]),
+        "test_mode": _fax_test_mode(),
+    }
+    if row["status"] == "SENT" and row["provider_fax_id"]:
+        try:
+            provider = phaxio_client.get_fax(row["provider_fax_id"])
+            out["provider_status"] = provider.get("status")
+            out["provider_num_pages"] = provider.get("num_pages")
+            out["provider_cost_cents"] = provider.get("cost_cents")
+        except phaxio_client.PhaxioError as exc:
+            out["provider_status"] = None
+            out["provider_error"] = str(exc)
+    return out

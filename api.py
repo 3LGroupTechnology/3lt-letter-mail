@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 import core
 import db
 import mail_provider
+import phaxio_client
 import risk
 import tlt_approvals
 import tlt_billing
@@ -49,6 +50,7 @@ if not ADMIN_TOKEN:
 app = FastAPI(title="3L-Group Technology — Letter Mail API", version="0.1.0")
 db.init_db()
 mail_provider.guard_live_key()
+phaxio_client.guard_live_key()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -390,6 +392,64 @@ def request_send(body: SendBody, key=Depends(require_key)):
 def send_status(request_id: int, key=Depends(require_key)):
     try:
         return core.get_status(request_id)
+    except core.AppError as exc:
+        raise _err(exc)
+
+
+# ---- agent: faxes -------------------------------------------------------------
+# Fax is a single-resource lifecycle under the caller's own key:
+# POST /v1/faxes creates a DRAFT (nothing transmitted), approve records the
+# human go-ahead, send transmits via Phaxio. A key can only ever see and
+# act on its own faxes (core enforces ownership; foreign ids 404).
+
+@app.post("/v1/faxes")
+async def create_fax(
+    file: UploadFile = File(...),
+    to_number: str = Form(...),
+    description: Optional[str] = Form(default=None),
+    key=Depends(require_key),
+):
+    """Upload a PDF as a fax DRAFT (multipart/form-data).
+
+    Form fields: file (the PDF, 10MB cap, magic-byte validated),
+    to_number (recipient fax number — 10-digit US or full E.164 with +),
+    description (optional label). Validates the number, counts pages,
+    screens content, and returns a price quote. Nothing is transmitted
+    until POST /v1/faxes/{id}/approve then /send.
+    """
+    pdf_bytes = await file.read()
+    try:
+        return core.create_fax_draft(
+            key,
+            to_number=to_number,
+            pdf_bytes=pdf_bytes,
+            filename=file.filename or "fax.pdf",
+            description=description,
+        )
+    except core.AppError as exc:
+        raise _err(exc)
+
+
+@app.post("/v1/faxes/{fax_id}/approve")
+def approve_fax(fax_id: int, key=Depends(require_key)):
+    try:
+        return core.approve_fax(key, fax_id)
+    except core.AppError as exc:
+        raise _err(exc)
+
+
+@app.post("/v1/faxes/{fax_id}/send")
+def send_fax(fax_id: int, key=Depends(require_key)):
+    try:
+        return core.send_fax(key, fax_id)
+    except core.AppError as exc:
+        raise _err(exc)
+
+
+@app.get("/v1/faxes/{fax_id}")
+def fax_status(fax_id: int, key=Depends(require_key)):
+    try:
+        return core.get_fax_status(key, fax_id)
     except core.AppError as exc:
         raise _err(exc)
 

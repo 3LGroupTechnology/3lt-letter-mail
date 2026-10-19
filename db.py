@@ -94,6 +94,23 @@ CREATE TABLE IF NOT EXISTS risk_events (
     detail TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS faxes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    api_key_id INTEGER,
+    to_number TEXT NOT NULL,
+    pdf_path TEXT,
+    page_count INTEGER,
+    description TEXT,
+    quote_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'DRAFT',
+    provider_fax_id TEXT,
+    failure_reason TEXT,
+    approved_by TEXT,
+    decided_at TEXT,
+    needs_review INTEGER NOT NULL DEFAULT 0,
+    idempotency_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE INDEX IF NOT EXISTS idx_risk_events_key_kind
     ON risk_events (api_key_id, kind);
 """
@@ -504,6 +521,45 @@ def update_send_request(request_id: int, **fields) -> None:
         conn.execute(
             f"UPDATE send_requests SET {', '.join(sets)} WHERE id = ?",
             [fields[k] for k in fields if k in allowed] + [request_id],
+        )
+
+
+# ---- faxes ------------------------------------------------------------------
+def insert_fax(api_key_id, to_number, page_count, description, quote,
+               needs_review=False) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO faxes
+               (api_key_id, to_number, page_count, description, quote_json,
+                needs_review)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                api_key_id,
+                to_number,
+                page_count,
+                description,
+                json.dumps(quote),
+                1 if needs_review else 0,
+            ),
+        )
+        return cur.lastrowid
+
+
+def get_fax(fax_id: int):
+    with connect() as conn:
+        return conn.execute("SELECT * FROM faxes WHERE id = ?", (fax_id,)).fetchone()
+
+
+def update_fax(fax_id: int, **fields) -> None:
+    allowed = {"pdf_path", "status", "provider_fax_id", "failure_reason",
+               "approved_by", "decided_at", "idempotency_key"}
+    sets = [f"{k} = ?" for k in fields if k in allowed]
+    if not sets:
+        return
+    with connect() as conn:
+        conn.execute(
+            f"UPDATE faxes SET {', '.join(sets)} WHERE id = ?",
+            [fields[k] for k in fields if k in allowed] + [fax_id],
         )
 
 

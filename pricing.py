@@ -12,6 +12,10 @@ Certified letters (USPS Certified Mail with Electronic Return Receipt) use
 PostGrid's published certified per-letter price instead of the first-class
 base — configurable via POSTGRID_CERTIFIED_COST_USD. The $1.00 service fee is
 unchanged for certified.
+
+Faxes mirror the letter shape: Phaxio's per-page cost (configurable via
+PHAXIO_PER_PAGE_USD, default is Phaxio's published ~$0.07/page US rate)
+times the page count, plus the same flat $1.00 service fee per fax.
 """
 from __future__ import annotations
 
@@ -65,4 +69,39 @@ def quote(base_cost: float, quantity: int, certified: bool = False) -> dict:
         "service_fee_total": service_total,
         "estimated_total": round(base_total + service_total, 2),
         "note": "Base cost is an estimate; PostGrid bills actuals.",
+    }
+
+
+def phaxio_per_page_cost() -> float:
+    """Estimated Phaxio per-page fax cost in USD (env-overridable).
+
+    Default is Phaxio's published US per-page rate (~$0.07/page). Phaxio
+    bills actuals, so every fax quote is labeled an estimate.
+    """
+    try:
+        return float(os.environ.get("PHAXIO_PER_PAGE_USD", "0.07"))
+    except ValueError:
+        return 0.07
+
+
+def quote_fax(pages: int, per_page_cost: float | None = None) -> dict:
+    """Return a price breakdown for one fax of `pages` pages.
+
+    Mirrors quote(): Phaxio per-page cost x pages as the base, plus the
+    same flat $1.00 service fee — charged once per fax, not per page.
+    """
+    if pages < 1:
+        raise ValueError("pages must be >= 1")
+    per_page = phaxio_per_page_cost() if per_page_cost is None else per_page_cost
+    base_total = round(per_page * pages, 2)
+    return {
+        "tier": "flat",
+        "kind": "fax",
+        "pages": pages,
+        "base_cost_per_page": round(per_page, 2),
+        "service_fee_per_fax": FLAT_FEE_USD,
+        "base_total": base_total,
+        "service_fee_total": FLAT_FEE_USD,
+        "estimated_total": round(base_total + FLAT_FEE_USD, 2),
+        "note": "Base cost is an estimate; Phaxio bills actuals.",
     }
