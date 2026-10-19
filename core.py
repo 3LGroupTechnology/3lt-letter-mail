@@ -339,7 +339,10 @@ def request_send(api_key_row, draft_id: int) -> dict:
     # Caps are risk-derived (AI-set), not static defaults.
     caps = risk.effective_caps(api_key_row)
     monthly_cap_cents = caps["monthly_cents"]
-    spent_month_cents = db.spend_month_cents(key_id)
+    # One cap pool per key across products: captured fax spend counts
+    # toward the same monthly cap as letter spend.
+    spent_month_cents = (db.spend_month_cents(key_id)
+                         + db.fax_spend_month_cents(key_id))
     # Caps are enforced on the CHARGED (gross) amount — the cap is the
     # customer-facing promise "never charged more than $X".
     if spent_month_cents + charge_cents > monthly_cap_cents:
@@ -707,6 +710,14 @@ def get_status(request_id: int) -> dict:
 # approve_fax() is that record, and send_fax() refuses anything not APPROVED.
 # Unlike letters there is no zero-prompt tier path for fax yet: every fax
 # takes the explicit approve step.
+#
+# Billing mirrors letters too, via tlt_billing.settle_fax(): send_fax()
+# enforces the same risk-derived caps on the GROSS charge (per-send, daily,
+# monthly — committed spend pooled across letters and faxes), then
+# authorize -> transmit -> capture, voiding the authorization if Phaxio
+# fails so a customer never pays for an unsent fax. A declined payment
+# leaves the fax FAILED and records a failed_payment risk event (which
+# freezes the key), exactly as approve_send() does for letters.
 
 def _fax_test_mode():
     """Phaxio test-mode flag, or None when fax is not configured yet."""
@@ -887,13 +898,20 @@ def approve_fax(api_key_row, fax_id: int) -> dict:
 
 
 def send_fax(api_key_row, fax_id: int) -> dict:
-    """Transmit an APPROVED fax via Phaxio.
+    """Transmit an APPROVED fax via Phaxio, billed like a letter.
+
+    Flow: caps check (on the GROSS charge) -> tlt_billing.settle_fax()
+    authorizes the key's Stripe payment method -> Phaxio transmits ->
+    the charge is captured and an itemized receipt is emailed. A Phaxio
+    failure voids the authorization (never charged for an unsent fax);
+    a declined payment fails the fax BEFORE anything is transmitted.
 
     Idempotency: the provider call carries the stable key
     ``3lt-fax-{fax_id}`` (same pattern as letters' ``3lt-send-{request_id}``),
-    and the status machine is the hard guard — an APPROVED fax can move to
-    SENT exactly once, so a retried send_fax() gets a 409, never a second
-    transmission.
+    the Stripe calls carry ``fax_{fax_id}:auth/:capture/:void``, and the
+    status machine is the hard guard — an APPROVED fax can move to SENT
+    exactly once, so a retried send_fax() gets a 409, never a second
+    transmission or a second charge.
     """
     actor = _actor(api_key_row)
     row = _get_owned_fax(api_key_row, fax_id)
@@ -906,6 +924,45 @@ def send_fax(api_key_row, fax_id: int) -> dict:
             409,
         )
     _check_fax_key_not_frozen(api_key_row, fax_id, actor)
+    key_id = api_key_row["id"]
+    quote = json.loads(row["quote_json"])
+    # NET stays net (Phaxio per-page + 3LT fee); the customer is charged
+    # the grossed-up figure so Stripe's processing rides on top invisibly
+    # — identical treatment to letters.
+    charge_cents = tlt_billing.gross_up(_amount_cents(quote))
+
+    # Risk caps are enforced on the CHARGED (gross) amount, against spend
+    # pooled across letters + faxes — the same caps request_send() checks
+    # for letters. A cap block is a 402 BEFORE any charge or transmission;
+    # the fax stays APPROVED so it can be retried once the cap allows.
+    caps = risk.effective_caps(api_key_row)
+    spent_month_cents = (db.spend_month_cents(key_id)
+                         + db.fax_spend_month_cents(key_id))
+    spent_today_cents = (db.spend_today_cents(key_id)
+                         + db.fax_spend_today_cents(key_id))
+    cap_block = None
+    if charge_cents > caps["per_send_cents"]:
+        cap_block = ("over_per_send_cap",
+                     f"This fax costs ${charge_cents / 100:.2f}, above your "
+                     f"per-send cap of ${caps['per_send_cents'] / 100:.2f} — "
+                     "nothing was faxed or charged.")
+    elif spent_month_cents + charge_cents > caps["monthly_cents"]:
+        cap_block = ("over_monthly_cap",
+                     f"Monthly spend cap reached "
+                     f"(${caps['monthly_cents'] / 100:.2f}). Raise your cap "
+                     "to send more — nothing was faxed or charged.")
+    elif spent_today_cents + charge_cents > caps["daily_cents"]:
+        cap_block = ("over_daily_cap",
+                     f"Daily spend cap reached "
+                     f"(${caps['daily_cents'] / 100:.2f}). Nothing was faxed "
+                     "or charged.")
+    if cap_block:
+        reason, message = cap_block
+        db.audit(actor, "fax.blocked", "fax", fax_id,
+                 {"reason": reason, "charge_cents": charge_cents,
+                  "spent_month_cents": spent_month_cents,
+                  "spent_today_cents": spent_today_cents, "caps": caps})
+        raise AppError(message, 402)
 
     # Live guard: a live Phaxio key is refused unless ALLOW_LIVE_FAX=1
     # (phaxio_client.send_fax re-checks at call time as defense in depth).
@@ -924,13 +981,35 @@ def send_fax(api_key_row, fax_id: int) -> dict:
 
     idempotency_key = f"3lt-fax-{fax_id}"
     db.update_fax(fax_id, idempotency_key=idempotency_key)
-    try:
-        result = phaxio_client.send_fax(
+
+    def _fulfill():
+        return phaxio_client.send_fax(
             to=row["to_number"],
             pdf_path=row["pdf_path"],
             idempotency_key=idempotency_key,
         )
+
+    try:
+        result, receipt = tlt_billing.settle_fax(
+            db, api_key_row, fax_id, charge_cents, "usd", _fulfill, actor
+        )
+    except tlt_billing.BillingError as exc:
+        # Declined/insufficient payment: the authorization failed inside
+        # settle_fax BEFORE fulfill ran, so nothing was transmitted.
+        db.update_fax(
+            fax_id, status="FAILED",
+            failure_reason=f"billing: {exc}", decided_at=_now(),
+        )
+        db.audit(actor, "fax.failed", "fax", fax_id,
+                 {"error": f"billing: {exc}"})
+        # Mirror letters: a failed payment freezes the key's sends until
+        # an admin unfreezes.
+        risk.record_event(key_id, "failed_payment",
+                          {"reason": str(exc), "fax_id": fax_id},
+                          actor=actor)
+        raise AppError(f"Billing failed: {exc}", 502)
     except phaxio_client.PhaxioError as exc:
+        # settle_fax already voided the Stripe authorization.
         db.update_fax(
             fax_id, status="FAILED", failure_reason=str(exc),
             decided_at=_now(),
@@ -938,26 +1017,81 @@ def send_fax(api_key_row, fax_id: int) -> dict:
         db.audit(actor, "fax.failed", "fax", fax_id, {"error": str(exc)})
         raise AppError(f"Phaxio send failed: {exc}", 502)
 
+    decided_at = _now()
     db.update_fax(
         fax_id,
         status="SENT",
-        provider_fax_id=result.get("id"),
-        decided_at=_now(),
+        provider_fax_id=result.get("id") if result else row["provider_fax_id"],
+        decided_at=decided_at,
     )
     db.audit(actor, "fax.sent", "fax", fax_id,
-             {"provider_fax_id": result.get("id")})
+             {"provider_fax_id": (result.get("id") if result else None),
+              "billed": receipt is not None})
     # Clean send: feed the risk model so caps rise with good history.
-    risk.recompute(api_key_row["id"], actor=actor)
+    risk.recompute(key_id, actor=actor)
+    _maybe_email_fax_receipt(api_key_row, row, fax_id, quote, receipt, actor,
+                             decided_at)
     return {
         "fax_id": fax_id,
         "status": "SENT",
         "to_number": row["to_number"],
         "page_count": row["page_count"],
-        "provider_fax_id": result.get("id"),
-        "provider_status": result.get("status"),
-        "quote": json.loads(row["quote_json"]),
+        "provider_fax_id": result.get("id") if result else None,
+        "provider_status": result.get("status") if result else None,
+        "quote": quote,
+        "billed": receipt is not None,
+        "stripe_payment_id": receipt["stripe_payment_id"] if receipt else None,
         "test_mode": _fax_test_mode(),
     }
+
+
+def _maybe_email_fax_receipt(key_row, fax_row, fax_id: int, quote: dict,
+                             receipt, actor: str, decided_at: str) -> None:
+    """Email an itemized receipt to the key owner's address after a
+    successful fax — the fax twin of _maybe_email_receipt(). Never raises:
+    mailer failures are audited, not fatal."""
+    email = key_row["owner_email"] if "owner_email" in key_row.keys() else None
+    if not email:
+        db.audit(actor, "receipt.skipped", "fax", fax_id,
+                 {"reason": "no_owner_email_on_key"})
+        return
+    item_lines = [
+        f"Fax — {fax_row['page_count']} page(s)"
+        + (f" ({fax_row['description']})" if fax_row["description"] else "")
+    ]
+    recipient_lines = [f"Fax number: {fax_row['to_number']}"]
+    # Same four-line breakdown as letters: base + 3LT fee (net) +
+    # processing = total charged.
+    net_cents = _amount_cents(quote)
+    gross_cents = (receipt["amount_cents"] if receipt
+                   else tlt_billing.gross_up(net_cents))
+    processing_cents = gross_cents - net_cents
+    try:
+        subject, html_body, text_body = tlt_receipts.build_receipt(
+            service_name=SERVICE_NAME,
+            item_lines=item_lines,
+            recipient_lines=recipient_lines,
+            decided_at=decided_at,
+            cost_lines=[
+                ("Provider base (est.)", f"${quote['base_total']:.2f}"),
+                ("3L-Group service fee", f"${quote['service_fee_total']:.2f}"),
+                ("Processing", f"${processing_cents / 100:.2f}"),
+            ],
+            total_str=f"${gross_cents / 100:.2f}",
+            charge_id=receipt["stripe_payment_id"] if receipt else None,
+            tier=draft_tier(key_row),
+            request_id=fax_id,
+            key_label=key_row["name"],
+        )
+        info = tlt_mailer.send_receipt(
+            email, subject, html_body, text_body,
+            {"fax_id": fax_id, "service": "letter-mail"},
+        )
+        db.audit(actor, "receipt.sent", "fax", fax_id,
+                 {"to": email, "backend": info.get("backend")})
+    except tlt_mailer.MailerError as exc:
+        db.audit(actor, "receipt.failed", "fax", fax_id,
+                 {"to": email, "error": str(exc)})
 
 
 def get_fax_status(api_key_row, fax_id: int) -> dict:
@@ -966,6 +1100,19 @@ def get_fax_status(api_key_row, fax_id: int) -> dict:
     outage never breaks the read (the stored snapshot is still returned).
     """
     row = _get_owned_fax(api_key_row, fax_id)
+    receipts = db.get_receipts_for_fax(fax_id)
+    billing_state = None
+    if receipts:
+        r = receipts[0]
+        billing_state = {
+            "status": r["status"],
+            "amount_cents": r["amount_cents"],
+            "currency": r["currency"],
+            "stripe_payment_id": r["stripe_payment_id"],
+            "receipt_id": r["id"],
+        }
+    elif api_key_row["stripe_customer_id"]:
+        billing_state = {"status": "not_charged_yet"}
     out = {
         "fax_id": row["id"],
         "kind": "fax",
@@ -980,6 +1127,7 @@ def get_fax_status(api_key_row, fax_id: int) -> dict:
         "created_at": row["created_at"],
         "decided_at": row["decided_at"],
         "quote": json.loads(row["quote_json"]),
+        "billing": billing_state,
         "test_mode": _fax_test_mode(),
     }
     if row["status"] == "SENT" and row["provider_fax_id"]:

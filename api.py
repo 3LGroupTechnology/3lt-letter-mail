@@ -25,7 +25,7 @@ if os.path.isdir(_SHARED) and _SHARED not in sys.path:
     sys.path.insert(0, _SHARED)
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 import core
@@ -177,6 +177,70 @@ def dashboard():
     return FileResponse(os.path.join(HERE, "dashboard", "index.html"))
 
 
+@app.get("/privacy")
+def privacy():
+    return FileResponse(os.path.join(HERE, "dashboard", "privacy.html"))
+
+
+@app.get("/privacy.html")
+def privacy_html():
+    return privacy()
+
+
+# ---- discovery metadata ------------------------------------------------------
+# This service has NO OAuth 2.0 / OIDC deployment: the REST API authenticates
+# with an API key in the X-API-Key header, and MCP tool calls carry the key
+# as the api_key argument (keys are issued via POST /v1/keys or the Connect
+# flow). The documents below follow RFC 8414 / RFC 9728 shape but declare
+# that reality — empty grant/response type lists, no authorization or token
+# endpoints — instead of advertising an OAuth flow that does not exist.
+# Directory listings that only require the metadata URL to resolve can use
+# them today; real OAuth support is a separate, larger build.
+def _auth_metadata() -> dict:
+    base = core.PUBLIC_BASE_URL
+    return {
+        "issuer": base,
+        "grant_types_supported": [],
+        "response_types_supported": [],
+        "response_modes_supported": [],
+        "token_endpoint_auth_methods_supported": [],
+        "code_challenge_methods_supported": [],
+        # Extension members describing the auth scheme actually in use.
+        "x-3lt-auth": {
+            "scheme": "api_key",
+            "api_key_format": "lms_...",
+            "rest_api": {
+                "header": "X-API-Key",
+                "how_to_get_a_key":
+                    "POST /v1/keys (admin) or the Connect flow: "
+                    "POST /v1/connect",
+            },
+            "mcp": {
+                "endpoint": f"{base}/mcp",
+                "transport": "streamable-http",
+                "credential": "api_key argument on every tool call",
+            },
+        },
+    }
+
+
+@app.get("/.well-known/oauth-authorization-server")
+def oauth_authorization_server_metadata():
+    return JSONResponse(_auth_metadata())
+
+
+@app.get("/.well-known/oauth-protected-resource")
+def oauth_protected_resource_metadata():
+    base = core.PUBLIC_BASE_URL
+    return JSONResponse({
+        "resource": f"{base}/mcp",
+        "authorization_servers": [],
+        "scopes_supported": [],
+        "bearer_methods_supported": [],
+        "x-3lt-auth": _auth_metadata()["x-3lt-auth"],
+    })
+
+
 # ---- admin: api keys --------------------------------------------------------
 @app.post("/v1/keys")
 def create_key(body: CreateKeyBody, _=Depends(require_admin)):
@@ -244,6 +308,14 @@ def connect_start(body: ConnectBody):
         "message": "Open the connect_url, save a payment method, then finalize "
                    "to receive your API key.",
     }
+
+
+@app.get("/connect")
+def connect_landing():
+    """Public Connect landing page: explains the one-time rail
+    authorization and starts it (the form posts to POST /v1/connect,
+    which returns the per-account /connect/<token> page)."""
+    return FileResponse(os.path.join(HERE, "dashboard", "connect-landing.html"))
 
 
 @app.get("/connect/{token}")
