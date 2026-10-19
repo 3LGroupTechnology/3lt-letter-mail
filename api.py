@@ -241,6 +241,224 @@ def oauth_protected_resource_metadata():
     })
 
 
+# ---- MCP server card (Smithery static discovery) ----------------------------
+# Smithery can bypass its live capability scan for auth-required servers
+# when the server hosts a static card at /.well-known/mcp/server-card.json
+# (their publish docs, "Static Server Card"). Our MCP endpoint requires an
+# API key on every tool call, so a scanner without credentials can never
+# enumerate the tools — this card declares them instead.
+#
+# Schema note: Smithery does not publish a rigid field list for the card,
+# so the fields below follow the Official MCP Registry listing for this
+# server (server.json: name/title/description/version/status/repository/
+# remotes) plus a `tools` array in the MCP tools/list shape (name,
+# description, inputSchema per tool, mirroring mcp_server.py signatures)
+# and the same x-3lt-auth extension used by the OAuth metadata documents
+# above. If Smithery tightens the card schema, this function is the single
+# place to adjust.
+_ADDRESS_SCHEMA = {
+    "type": "object",
+    "description": "US postal address.",
+    "properties": {
+        "name": {"type": "string"},
+        "address_line1": {"type": "string"},
+        "address_line2": {"type": "string"},
+        "address_city": {"type": "string"},
+        "address_state": {"type": "string"},
+        "address_zip": {"type": "string"},
+        "address_country": {"type": "string", "default": "US"},
+    },
+    "required": ["name", "address_line1", "address_city",
+                 "address_state", "address_zip"],
+}
+
+_API_KEY_PROP = {
+    "type": "string",
+    "description": "Your 3L-Group Technology API key (lms_...), issued "
+                   "by the service — see the authentication block.",
+}
+
+
+def _server_card_tools() -> list:
+    return [
+        {
+            "name": "draft_letter",
+            "description": "Create a letter DRAFT: verifies the recipient "
+                           "address with PostGrid, screens content, and "
+                           "returns a price quote. NEVER mails anything. "
+                           "Accepts html (letter body) or pdf_path "
+                           "(server-local PDF). certified=True opts into "
+                           "USPS Certified Mail with Electronic Return "
+                           "Receipt (default is standard First Class).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "api_key": _API_KEY_PROP,
+                    "to": _ADDRESS_SCHEMA,
+                    "from_address": _ADDRESS_SCHEMA,
+                    "html": {"type": "string"},
+                    "pdf_path": {"type": "string"},
+                    "color": {"type": "boolean", "default": False},
+                    "quantity": {"type": "integer", "default": 1},
+                    "description": {"type": "string"},
+                    "certified": {"type": "boolean", "default": False},
+                },
+                "required": ["api_key", "to", "from_address"],
+            },
+        },
+        {
+            "name": "request_send",
+            "description": "Request that a draft be mailed. Approval-tier "
+                           "keys get a PENDING request plus a one-tap "
+                           "Allow/Deny link — nothing is mailed until a "
+                           "human allows it. on_command keys may auto-send "
+                           "inside guardrails (spend caps, screening, "
+                           "anomaly detection).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "api_key": _API_KEY_PROP,
+                    "draft_id": {"type": "integer"},
+                },
+                "required": ["api_key", "draft_id"],
+            },
+        },
+        {
+            "name": "send_status",
+            "description": "Check a send request: status (PENDING/SENT/"
+                           "REJECTED/FAILED), trust-tier decision, approval "
+                           "state, and billing state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "api_key": _API_KEY_PROP,
+                    "request_id": {"type": "integer"},
+                },
+                "required": ["api_key", "request_id"],
+            },
+        },
+        {
+            "name": "create_fax_draft",
+            "description": "Create a fax DRAFT from a server-local PDF: "
+                           "validates the recipient fax number, counts "
+                           "pages, screens content, and returns a price "
+                           "quote (Phaxio per-page cost x pages + the flat "
+                           "$1.00 service fee). NEVER transmits anything.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "api_key": _API_KEY_PROP,
+                    "to_number": {
+                        "type": "string",
+                        "description": "Recipient fax number: 10-digit US "
+                                       "number or full E.164 starting "
+                                       "with +.",
+                    },
+                    "pdf_path": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["api_key", "to_number", "pdf_path"],
+            },
+        },
+        {
+            "name": "approve_fax",
+            "description": "Approve a fax DRAFT so it can be transmitted. "
+                           "Content is re-screened at approval time. "
+                           "Nothing is transmitted by this call.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "api_key": _API_KEY_PROP,
+                    "fax_id": {"type": "integer"},
+                },
+                "required": ["api_key", "fax_id"],
+            },
+        },
+        {
+            "name": "send_fax",
+            "description": "Transmit an APPROVED fax via Phaxio. Refuses "
+                           "drafts that were never approved and faxes that "
+                           "were already sent — a fax transmits exactly "
+                           "once. There is no zero-prompt fax path.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "api_key": _API_KEY_PROP,
+                    "fax_id": {"type": "integer"},
+                },
+                "required": ["api_key", "fax_id"],
+            },
+        },
+        {
+            "name": "get_fax_status",
+            "description": "Check a fax: lifecycle status (DRAFT/APPROVED/"
+                           "SENT/FAILED), page count, quote, billing state, "
+                           "and — once sent — live Phaxio delivery status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "api_key": _API_KEY_PROP,
+                    "fax_id": {"type": "integer"},
+                },
+                "required": ["api_key", "fax_id"],
+            },
+        },
+    ]
+
+
+def _server_card() -> dict:
+    base = core.PUBLIC_BASE_URL
+    return {
+        # Identity — aligned with the Official MCP Registry listing
+        # (server.json): same title, description, version, repository.
+        "name": "3lt-letter-mail",
+        "qualifiedName": "com.3lgrouptechnology/3lt-letter-mail",
+        "title": "3LT Letter Mail",
+        "displayName": "3lt Letter Mail",
+        "description": "Give AI assistants hands: send real USPS letters "
+                       "and real faxes from any MCP-compatible assistant. "
+                       "Letters are printed and mailed via PostGrid; faxes "
+                       "are transmitted via Phaxio. Every send passes an "
+                       "approval gate (human tap or a standing Connect "
+                       "authorization) and risk-derived spend caps.",
+        "version": "1.0.0",
+        "status": "active",
+        "websiteUrl": base,
+        "repository": {
+            "source": "github",
+            "url": "https://github.com/3LGroupTechnology/3lt-letter-mail",
+        },
+        "remotes": [
+            {
+                "type": "streamable-http",
+                "url": f"{base}/mcp",
+            }
+        ],
+        # No OAuth deployment — see the discovery-metadata comment above.
+        "authentication": {
+            "type": "api_key",
+            "scheme": "api_key",
+            "api_key_format": "lms_...",
+            "mcp": "api_key argument on every tool call",
+            "rest_api": "X-API-Key header",
+            "how_to_get_a_key": "POST /v1/connect (self-serve rail "
+                                "authorization) or POST /v1/keys (admin)",
+        },
+        "x-3lt-auth": _auth_metadata()["x-3lt-auth"],
+        "tools": _server_card_tools(),
+    }
+
+
+@app.get("/.well-known/mcp/server-card.json")
+def mcp_server_card():
+    """Static MCP server card for directory discovery (Smithery et al.).
+
+    Public by design — it contains only information already on the public
+    site and in the registry listing. Tool list mirrors mcp_server.py.
+    """
+    return JSONResponse(_server_card())
+
+
 # ---- admin: api keys --------------------------------------------------------
 @app.post("/v1/keys")
 def create_key(body: CreateKeyBody, _=Depends(require_admin)):
