@@ -413,8 +413,8 @@ def _server_card() -> dict:
         # (server.json): same title, description, version, repository.
         "name": "3lt-letter-mail",
         "qualifiedName": "com.3lgrouptechnology/3lt-letter-mail",
-        "title": "3LT Letter Mail",
-        "displayName": "3lt Letter Mail",
+        "title": "3LT Mail & Fax",
+        "displayName": "3lt Mail & Fax",
         "description": "Give AI assistants hands: send real USPS letters "
                        "and real faxes from any MCP-compatible assistant. "
                        "Letters are printed and mailed via PostGrid; faxes "

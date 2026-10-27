@@ -89,8 +89,8 @@ print-and-mail provider). One price, no tiers, no volume games. Certified Mail
 with Electronic Return Receipt is opt-in and costs more — it's never the default.
 
 **Fax:** the same flat shape — Phaxio's per-page cost (**~$0.07/page**) times
-the page count, plus the same **$1.00 service fee per fax** (charged once per
-fax, not per page). A one-page fax quotes $1.07 before processing gross-up;
+the page count, plus a **$0.50 service fee per fax** (charged once per
+fax, not per page). A one-page fax quotes $0.57 before processing gross-up;
 the customer's card is charged the grossed-up total on send, exactly like a
 letter.
 

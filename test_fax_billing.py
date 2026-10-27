@@ -176,8 +176,8 @@ def stripe_counts():
 with patch("phaxio_client.send_fax", side_effect=fake_send_fax), patch(
     "phaxio_client.get_fax", side_effect=fake_get_fax
 ):
-    # Gross for a 1-page fax: net $1.07 -> gross_up(107) = ceil(137/0.971).
-    assert tlt_billing.gross_up(107) == 142
+    # Gross for a 1-page fax: net $0.57 -> gross_up(57) = ceil(87/0.971).
+    assert tlt_billing.gross_up(57) == 90
 
     # 1. exactly one charge attempt, at the quoted gross total --------------
     kid, key = issue_key("billed-agent")
@@ -191,7 +191,7 @@ with patch("phaxio_client.send_fax", side_effect=fake_send_fax), patch(
     creates, captures, cancels = stripe_counts()
     assert (creates, captures, cancels) == (1, 1, 0), stripe_counts()
     auth = _FakePaymentIntent.create_calls[0]
-    assert auth["amount"] == 142, auth  # the quoted total, grossed up
+    assert auth["amount"] == 90, auth  # the quoted total, grossed up
     assert auth["idempotency_key"] == f"fax_{fax_id}:auth", auth
     assert auth["metadata"] == {"fax_id": str(fax_id)}, auth
     cap_call = _FakePaymentIntent.capture_calls[0]
@@ -199,12 +199,12 @@ with patch("phaxio_client.send_fax", side_effect=fake_send_fax), patch(
     assert len(phaxio_calls) == 1
     receipt = db.get_fax_receipt_by_idempotency(f"fax_{fax_id}:capture")
     assert receipt is not None and receipt["status"] == "succeeded"
-    assert receipt["amount_cents"] == 142 and receipt["fax_id"] == fax_id
+    assert receipt["amount_cents"] == 90 and receipt["fax_id"] == fax_id
     assert receipt["send_request_id"] is None  # never aliased onto a letter
     st = c.get(f"/v1/faxes/{fax_id}", headers=H).json()
     assert st["billing"]["status"] == "succeeded", st
-    assert st["billing"]["amount_cents"] == 142, st
-    print("1. one authorize+capture at the $1.42 gross quote; fax receipt ✔")
+    assert st["billing"]["amount_cents"] == 90, st
+    print("1. one authorize+capture at the $0.90 gross quote; fax receipt ✔")
 
     # 2. retry -> 409, still exactly one charge and one transmission -------
     r = c.post(f"/v1/faxes/{fax_id}/send", headers=H)
@@ -238,7 +238,7 @@ with patch("phaxio_client.send_fax", side_effect=fake_send_fax), patch(
     # 4a. caps block: monthly cap below one fax's gross --------------------
     kid3, key3 = issue_key("capped-agent")
     H3 = {"X-API-Key": key3}
-    risk.apply_override(kid3, {"caps": {"monthly_cents": 100,
+    risk.apply_override(kid3, {"caps": {"monthly_cents": 80,
                                         "daily_cents": 2500,
                                         "per_send_cents": 5000}},
                         actor="test")
@@ -253,9 +253,9 @@ with patch("phaxio_client.send_fax", side_effect=fake_send_fax), patch(
     assert st["status"] == "APPROVED", st  # retryable once the cap allows
     print("4a. monthly cap < fax price -> 402 before charge/transmit ✔")
 
-    # 4b. caps pool across sends: agent 1 already spent 142 this month;
-    # a 200 monthly cap leaves no room for a second 142 fax.
-    risk.apply_override(kid, {"caps": {"monthly_cents": 200,
+    # 4b. caps pool across sends: agent 1 already spent 90 this month;
+    # a 150 monthly cap leaves no room for a second 90 fax.
+    risk.apply_override(kid, {"caps": {"monthly_cents": 150,
                                        "daily_cents": 2500,
                                        "per_send_cents": 5000}},
                         actor="test")

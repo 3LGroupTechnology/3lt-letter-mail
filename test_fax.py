@@ -129,10 +129,10 @@ with patch("phaxio_client.send_fax", side_effect=fake_send_fax), patch(
     assert fax["test_mode"] is True
     q = fax["quote"]
     assert q["pages"] == 1 and q["base_cost_per_page"] == 0.07
-    assert q["base_total"] == 0.07 and q["service_fee_total"] == 1.00
-    assert q["estimated_total"] == 1.07, q
+    assert q["base_total"] == 0.07 and q["service_fee_total"] == 0.50
+    assert q["estimated_total"] == 0.57, q
     fax_id = fax["fax_id"]
-    print("1. fax draft -> normalized number, 1 page, $0.07 + $1.00 = $1.07 ✔")
+    print("1. fax draft -> normalized number, 1 page, $0.07 + $0.50 = $0.57 ✔")
 
     # 2. send before approve -> 409, nothing transmitted
     r = c.post(f"/v1/faxes/{fax_id}/send", headers=H)
@@ -172,13 +172,13 @@ with patch("phaxio_client.send_fax", side_effect=fake_send_fax), patch(
     assert st["provider_cost_cents"] == 7
     print("5. GET fax -> SENT + Phaxio delivery status refreshed ✔")
 
-    # 6. multi-page quote: 3 pages x $0.07 + $1.00 flat = $1.21
+    # 6. multi-page quote: 3 pages x $0.07 + $0.50 flat = $0.71
     r = post_fax(PDF3, "+1 216 555 0123")
     assert r.status_code == 200, r.text
     q = r.json()["quote"]
     assert r.json()["page_count"] == 3
-    assert q["base_total"] == 0.21 and q["estimated_total"] == 1.21, q
-    print("6. 3-page fax quote -> $0.21 base + $1.00 fee = $1.21 ✔")
+    assert q["base_total"] == 0.21 and q["estimated_total"] == 0.71, q
+    print("6. 3-page fax quote -> $0.21 base + $0.50 fee = $0.71 ✔")
 
     # 7. bad numbers -> 422 (too short, 7-digit, letters, short E.164)
     for bad in ("123", "555-0123", "call me maybe", "+12345", ""):

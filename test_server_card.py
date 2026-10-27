@@ -34,8 +34,8 @@ card = r.json()
 # 2. Identity matches the registry listing (server.json).
 assert card["name"] == "3lt-letter-mail"
 assert card["qualifiedName"] == "com.3lgrouptechnology/3lt-letter-mail"
-assert card["title"] == "3LT Letter Mail"
-assert card["displayName"] == "3lt Letter Mail"
+assert card["title"] == "3LT Mail & Fax"
+assert card["displayName"] == "3lt Mail & Fax"
 assert card["version"] == "1.0.0"
 assert card["status"] == "active"
 assert card["repository"]["url"] == \

@@ -30,6 +30,7 @@ import hashlib
 import os
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 import core
 import db
@@ -73,7 +74,19 @@ def _auth(api_key: str):
     return row
 
 
-@mcp.tool()
+# Tool titles + annotations below are explicit and behavior-derived (verified
+# against core.py) for curated directory review: every tool declares the full
+# hint set, no nulls. Do not loosen a hint without re-checking the behavior —
+# e.g. send_status is read_only_hint=False on purpose (see its comment).
+@mcp.tool(
+    title="Draft a Letter",
+    annotations=ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,  # verifies the recipient address via PostGrid
+    ),
+)
 def draft_letter(
     api_key: str,
     to: dict,
@@ -129,7 +142,19 @@ def draft_letter(
         return {"error": str(exc), "code": exc.code}
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Request Letter Send",
+    annotations=ToolAnnotations(
+        read_only_hint=False,
+        # Can mail a physical letter and capture a Stripe charge; on
+        # on_command keys it may auto-send inside guardrails.
+        destructive_hint=True,
+        # Every call inserts a NEW send request — a repeat can mail and
+        # charge again (caps permitting).
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
 def request_send(api_key: str, draft_id: int) -> dict:
     """Request that a draft be mailed.
 
@@ -149,7 +174,19 @@ def request_send(api_key: str, draft_id: int) -> dict:
         return {"error": str(exc), "code": exc.code}
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Check Letter Send Status",
+    annotations=ToolAnnotations(
+        # A read in spirit, but NOT read-only: while a request is PENDING,
+        # core.get_status calls ensure_approval_link(), which mints a fresh
+        # single-use approval token (a real write). readOnlyHint stays False
+        # deliberately — do not "fix" the hint or the behavior here.
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=False,
+    ),
+)
 def send_status(api_key: str, request_id: int) -> dict:
     """Check a send request: status (PENDING/SENT/REJECTED/FAILED), the key's
     trust tier and tier decision, approval state (+approval_url while pending),
@@ -166,7 +203,17 @@ def send_status(api_key: str, request_id: int) -> dict:
         return {"error": str(exc), "code": exc.code}
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Draft a Fax",
+    annotations=ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        # Number normalization, page count, screening and pricing are all
+        # local — no provider call happens at draft time.
+        open_world_hint=False,
+    ),
+)
 def create_fax_draft(
     api_key: str,
     to_number: str,
@@ -198,7 +245,17 @@ def create_fax_draft(
         return {"error": str(exc), "code": exc.code}
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Approve a Fax",
+    annotations=ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=False,
+        # Records the approval gate (DRAFT -> APPROVED) and transmits
+        # nothing; a repeat call returns 409 and changes nothing further.
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
 def approve_fax(api_key: str, fax_id: int) -> dict:
     """Approve a fax DRAFT so it can be transmitted. The content is
     re-screened at approval time. Only the key that created the fax can
@@ -215,7 +272,19 @@ def approve_fax(api_key: str, fax_id: int) -> dict:
         return {"error": str(exc), "code": exc.code}
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Send a Fax",
+    annotations=ToolAnnotations(
+        read_only_hint=False,
+        # Transmits a real fax via Phaxio and captures the charge.
+        destructive_hint=True,
+        # Deliberate and code-backed: the lifecycle sends exactly once, a
+        # retry returns 409, and the Phaxio/Stripe calls carry the stable
+        # idempotency key 3lt-fax-{fax_id}. Do not "correct" this to False.
+        idempotent_hint=True,
+        open_world_hint=True,
+    ),
+)
 def send_fax(api_key: str, fax_id: int) -> dict:
     """Transmit an APPROVED fax via Phaxio. Refuses drafts that were never
     approved and faxes that were already sent — a fax can be transmitted
@@ -232,7 +301,17 @@ def send_fax(api_key: str, fax_id: int) -> dict:
         return {"error": str(exc), "code": exc.code}
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Check Fax Status",
+    annotations=ToolAnnotations(
+        # The only pure read of the seven tools.
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        # For SENT faxes it fetches live delivery status from Phaxio.
+        open_world_hint=True,
+    ),
+)
 def get_fax_status(api_key: str, fax_id: int) -> dict:
     """Check a fax: lifecycle status (DRAFT/APPROVED/SENT/FAILED), page
     count, quote, and — once sent — the live delivery status from Phaxio.

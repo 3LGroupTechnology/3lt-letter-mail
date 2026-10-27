@@ -15,13 +15,15 @@ unchanged for certified.
 
 Faxes mirror the letter shape: Phaxio's per-page cost (configurable via
 PHAXIO_PER_PAGE_USD, default is Phaxio's published ~$0.07/page US rate)
-times the page count, plus the same flat $1.00 service fee per fax.
+times the page count, plus a flat $0.50 service fee per fax (the fax fee
+is locked at $0.50 — owner ruling 2026-10-05 — and is NOT the letter fee).
 """
 from __future__ import annotations
 
 import os
 
 FLAT_FEE_USD = 1.00
+FAX_FLAT_FEE_USD = 0.50
 
 
 def base_cost_estimate() -> float:
@@ -88,7 +90,7 @@ def quote_fax(pages: int, per_page_cost: float | None = None) -> dict:
     """Return a price breakdown for one fax of `pages` pages.
 
     Mirrors quote(): Phaxio per-page cost x pages as the base, plus the
-    same flat $1.00 service fee — charged once per fax, not per page.
+    flat $0.50 fax service fee — charged once per fax, not per page.
     """
     if pages < 1:
         raise ValueError("pages must be >= 1")
@@ -99,9 +101,9 @@ def quote_fax(pages: int, per_page_cost: float | None = None) -> dict:
         "kind": "fax",
         "pages": pages,
         "base_cost_per_page": round(per_page, 2),
-        "service_fee_per_fax": FLAT_FEE_USD,
+        "service_fee_per_fax": FAX_FLAT_FEE_USD,
         "base_total": base_total,
-        "service_fee_total": FLAT_FEE_USD,
-        "estimated_total": round(base_total + FLAT_FEE_USD, 2),
+        "service_fee_total": FAX_FLAT_FEE_USD,
+        "estimated_total": round(base_total + FAX_FLAT_FEE_USD, 2),
         "note": "Base cost is an estimate; Phaxio bills actuals.",
     }
