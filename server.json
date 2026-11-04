@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "description": "Give AI assistants hands: send real USPS letters via MCP.",
+  "description": "AI assistants send real USPS letters ($1 flat) and faxes ($0.50 flat) via MCP.",
   "name": "com.3lgrouptechnology/3lt-letter-mail",
   "remotes": [
     {
@@ -14,5 +14,5 @@
   },
   "status": "active",
   "title": "3LT Mail & Fax",
-  "version": "1.0.0"
+  "version": "1.0.1"
 }
